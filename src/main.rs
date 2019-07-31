@@ -9,6 +9,7 @@ extern crate hobbits;
 
 use hobbits::encoding::{marshal, unmarshal, Envelope};
 
+
 fn main() {
 
     // Parse command-line options:
@@ -42,10 +43,10 @@ fn main() {
                     match rslt {
                         Ok(msg) => {
                             println!("AAAA: {}", msg);
-                            if msg.protocol == "PING" {
+                            if msg.protocol == 2 {
                                 let pong_msg = Envelope {
-                                    protocol: "PONG".to_string(),
-                                    version: "0.1".to_string(),
+                                    protocol: 2,
+                                    version: 3,
                                     header: msg.header,
                                     body: msg.body
                                 };

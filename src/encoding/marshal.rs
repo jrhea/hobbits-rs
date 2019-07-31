@@ -1,21 +1,18 @@
 
-pub use super::envelope::{Envelope};
 use crate::encoding::EwpError;
+use std::mem::transmute;
+use byteorder::{BigEndian, WriteBytesExt};
 
+pub use super::envelope::{Envelope};
 
 /// Marshal takes a parsed message and encodes it to a wire protocol message
 pub fn marshal(msg: &Envelope) -> Result<Vec<u8>, EwpError> {
 
-    if msg.version == "" { return Err(EwpError::new("missing version!")) }
-    if msg.protocol == "" { return Err(EwpError::new("missing protocol!")) }
-
-    let header: String = format!("EWP {} {} {} {}\n",
-                                msg.version,
-                                msg.protocol,
-                                msg.header.len(),
-                                msg.body.len());
-
-    let mut outbytes: Vec<u8> = header.into_bytes();
+    let mut outbytes: Vec<u8> = Envelope::preamble().into_bytes();
+    outbytes.write_u32::<BigEndian>(msg.version).unwrap();
+    outbytes.write_u8(msg.protocol).unwrap();
+    outbytes.write_u32::<BigEndian>(msg.header.len() as u32).unwrap();
+    outbytes.write_u32::<BigEndian>(msg.body.len() as u32).unwrap();
     outbytes.extend(&msg.header);
     outbytes.extend(&msg.body);
 
@@ -26,59 +23,47 @@ pub fn marshal(msg: &Envelope) -> Result<Vec<u8>, EwpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Envelope, marshal, EwpError};
+use bytes::BytesMut;
+use super::{Envelope, marshal, EwpError};
 
     #[test]
     fn basic_sanity() {
         //   - desc: 'no body'
-        //     marshalled: "EWP 0.2 PING 0 0\n"
-        let mut msg = Envelope::new("PING", &vec!(), &vec!());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 0 0\n".as_bytes());
+        //     marshalled: "EWP 3 0 0 0 "
+        let mut marshalled = marshal(&Envelope::new(3, 0, &vec!(), &vec!())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}",hex::encode("EWP"),"00000003000000000000000000"));
         //   - desc: '10 byte body'
-        //     marshalled: "EWP 0.2 PING 0 10\n0123456789"
-        msg = Envelope::new("PING", &vec!(), "0123456789".as_bytes());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 0 10\n0123456789".as_bytes());
+        //     marshalled: "EWP 3 0 0 10  0123456789"
+        marshalled = marshal(&Envelope::new(3, 0, &vec!(), "0123456789".as_bytes())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}{}",hex::encode("EWP"),"0000000300000000000000000a", hex::encode("0123456789".as_bytes())));
         //   - desc: '10 byte header'
-        //     marshalled: "EWP 0.2 PING 10 0\n0123456789"
-        msg = Envelope::new("PING", "0123456789".as_bytes(), &vec!());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 10 0\n0123456789".as_bytes());
+        //     marshalled: "EWP 3 0 10 0 0123456789 "
+        marshalled = marshal(&Envelope::new(3, 0, "0123456789".as_bytes(),&vec!())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}{}",hex::encode("EWP"),"00000003000000000a00000000", hex::encode("0123456789".as_bytes())));
         //   - desc: '9 byte header, 10 byte body'
-        //     marshalled: "EWP 0.2 PING 9 10\n9876543210123456789"
-        msg = Envelope::new("PING", "987654321".as_bytes(), "0123456789".as_bytes());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 9 10\n9876543210123456789".as_bytes());
-        //   - desc: '9 byte header, 10 byte body, extra newlines'
-        //     marshalled: "EWP 0.2 PING 9 10\n\n876543210123456\n89"
-        msg = Envelope::new("PING", "\n87654321".as_bytes(), "0123456\n89".as_bytes());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 9 10\n\n876543210123456\n89".as_bytes());
-        //   - desc: '9 byte header, 10 byte body, extra extra newlines'
-        //     marshalled: "EWP 0.2 PING 9 10\n\n87654321\n\n\n\n\n\n\n\n\n\n"
-        msg = Envelope::new("PING", "\n87654321".as_bytes(), "\n\n\n\n\n\n\n\n\n\n".as_bytes());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 9 10\n\n87654321\n\n\n\n\n\n\n\n\n\n".as_bytes());
-        //   - desc: '9 byte header, 10 byte body, control character montage'
-        //     marshalled: "EWP 0.2 PING 9 10\n\n87654321\n\0\a\b\f\n\r\t\v\\"
-        // NOTE: those aren't valid Rust control characters...
-        msg = Envelope::new("PING", "\n87654321".as_bytes(), "\n\0\x0a\x0b\x0f\n\r\t\x01\\".as_bytes());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 9 10\n\n87654321\n\0\x0a\x0b\x0f\n\r\t\x01\\".as_bytes());
+        //     marshalled: "EWP 3 0 9 10 987654321 0123456789"
+        marshalled = marshal(&Envelope::new(3, 0, "987654321".as_bytes(),"0123456789".as_bytes())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}{}{}",hex::encode("EWP"),"0000000300000000090000000a", hex::encode("987654321".as_bytes()), hex::encode("0123456789".as_bytes())));
     }
 
     #[test]
     fn different_commands() {
-        //   - desc: 'PING'
-        //     marshalled: "EWP 0.2 PING 0 0\n"
-        let mut msg = Envelope::new("PING", &vec!(), &vec!());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PING 0 0\n".as_bytes());
-        //   - desc: 'FOO'
-        //     marshalled: "EWP 0.2 FOO 0 0\n"
-        msg = Envelope::new("FOO", &vec!(), &vec!());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 FOO 0 0\n".as_bytes());
-        //   - desc: 'BAR'
-        //     marshalled: "EWP 0.2 BAR 0 0\n"
-        msg = Envelope::new("BAR", &vec!(), &vec!());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 BAR 0 0\n".as_bytes());
-        //   - desc: 'PONG'
-        //     marshalled: "EWP 0.2 PONG 0 0\n"
-        msg = Envelope::new("PONG", &vec!(), &vec!());
-        assert_eq!(marshal(&msg).unwrap(), "EWP 0.2 PONG 0 0\n".as_bytes());
+        //   - desc: GOSSIP
+        //     marshalled: "EWP 3 2 0 0"
+        let mut marshalled = marshal(&Envelope::new(3, 1, &vec!(), &vec!())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}",hex::encode("EWP"),"00000003010000000000000000"));
+        //   - desc: PING
+        //     marshalled: "EWP 3 2 0 0"
+        marshalled = marshal(&Envelope::new(3, 2, &vec!(), &vec!())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}",hex::encode("EWP"),"00000003020000000000000000"));
+        //   - desc: UNDEFINED PROTOCOL
+        //     marshalled: "EWP 3 3 0 0"
+        marshalled = marshal(&Envelope::new(3, 3, &vec!(), &vec!())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}",hex::encode("EWP"),"00000003030000000000000000"));
+        //   - desc:  UNDEFINED PROTOCOL
+        //     marshalled: "EWP 3 4 0 0"
+        marshalled = marshal(&Envelope::new(3, 4, &vec!(), &vec!())).unwrap();
+        assert_eq!(hex::encode(marshalled), format!("{}{}",hex::encode("EWP"),"00000003040000000000000000"));
     }
 
     #[test]
@@ -90,71 +75,38 @@ mod tests {
         let tests: Vec<Test> = vec!(
     		Test{
     			encoded: Envelope{
-    				version:     "13.05".to_string(),
-    				protocol:    "RPC".to_string(),
+    				version:     13,
+    				protocol:    0,
     				header:      "this is a header".to_string().into_bytes(),
     				body:        "this is a body".to_string().into_bytes(),
     			},
-    			message: "EWP 13.05 RPC 16 14\nthis is a headerthis is a body".to_string(),
+                message: format!("{}{}{}{}",hex::encode("EWP"),"0000000d00000000100000000e", hex::encode("this is a header".as_bytes()), hex::encode("this is a body".as_bytes()))
     		},
-    		Test{
-    			encoded: Envelope{
-    				version:     "13.05".to_string(),
-    				protocol:    "GOSSIP".to_string(),
-    				header:      "testing".to_string().into_bytes(),
-    				body:        "testing body".to_string().into_bytes(),
-    			},
-    			message: "EWP 13.05 GOSSIP 7 12\ntestingtesting body".to_string(),
-    		},
-    		Test{
-    			encoded: Envelope{
-    				version:     "1230329483.05392489".to_string(),
-    				protocol:    "RPC".to_string(),
-    				header:      "test".to_string().into_bytes(),
-    				body:        "test".to_string().into_bytes(),
-    			},
-    			message: "EWP 1230329483.05392489 RPC 4 4\ntesttest".to_string(),
-    		},
+    		 Test{
+    		 	encoded: Envelope{
+    		 		version:     13,
+    		 		protocol:    1,
+    		 		header:      "testing".to_string().into_bytes(),
+    		 		body:        "testing body".to_string().into_bytes(),
+    		 	},
+                 message: format!("{}{}{}{}",hex::encode("EWP"),"0000000d01000000070000000c", hex::encode("testing".as_bytes()), hex::encode("testing body".as_bytes()))
+    		 },
+    		 Test{
+    		 	encoded: Envelope{
+    		 		version:     1230329483,
+    		 		protocol:    0,
+    		 		header:      "test".to_string().into_bytes(),
+    		 		body:        "test".to_string().into_bytes(),
+    		 	},
+                 message: format!("{}{}{}{}",hex::encode("EWP"),"4955568b000000000400000004", hex::encode("test".as_bytes()), hex::encode("test".as_bytes()))
+    		 },
     	);
 
         for t in tests.iter() {
             let marshalled = marshal(&t.encoded).unwrap();
             println!("{}", t.message);
-            assert!(marshalled == t.message.as_bytes());
-        }
-    }
-
-    #[test]
-    fn test_marshal_unsuccessful() {
-        struct Test {
-            encoded: Envelope,
-            err: EwpError
-        }
-        let tests: Vec<Test> = vec!(
-    		Test{
-    			encoded: Envelope{
-    				version:     "".to_string(),
-    				protocol:    "RPC".to_string(),
-    				header:     "this is a header".to_string().into_bytes(),
-    				body:        "this is a body".to_string().into_bytes(),
-    			},
-    			err: EwpError::new("cannot marshal message, version not found"),
-    		},
-    		Test{
-    			encoded: Envelope{
-    				version:     "1230329483.05392489".to_string(),
-    				protocol:    "".to_string(),
-    				header:     "test".to_string().into_bytes(),
-    				body:        "test".to_string().into_bytes(),
-    			},
-    			err: EwpError::new("cannot marshal message, protocol not found"),
-    		},
-    	);
-
-        for t in tests.iter() {
-            let marshalled = marshal(&t.encoded);
-            println!("{}", t.err);
-            //assert!(marshalled == t.message.as_bytes());
+            println!("{}", hex::encode(&marshalled));
+            assert!(hex::encode(marshalled) == t.message);
         }
     }
 }

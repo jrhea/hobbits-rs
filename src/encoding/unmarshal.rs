@@ -1,91 +1,83 @@
 
 pub use crate::encoding::envelope::Envelope;
+pub use crate::encoding::marshal;
 pub use crate::encoding::EwpError;
+use std::io::Cursor;
+use byteorder::{BigEndian, ReadBytesExt};
+use std::convert::TryFrom;
 
 pub fn unmarshal(msg: &[u8]) -> Result<Envelope,EwpError> {
-    let index = msg.iter().position(|&r| r == '\n' as u8);
-    let index = index.ok_or( EwpError::new("message request must contain 2 lines") )?;
-
-    let hdr = &msg[0..index];
-    let payload = &msg[(index+1)..];
-    let hdr_str = String::from_utf8(hdr.to_vec())?; // fail out with Err if unparseable
-    let hdr_parts: Vec<&str> = hdr_str.split(' ').collect();
-    if hdr_parts.len() != 5 { return Err(EwpError::new("not all metadata provided")) }
-    if hdr_parts[0] != "EWP" { return Err(EwpError::new("malformed EWP envelope: must start with 'EWP'")) }
-
-    let version = hdr_parts[1];
-    if !version.contains('.') { return Err(EwpError::new("EWP version cannot be parsed")) }
-    // check for proper version matching regexp(`^(\d+\.)(\d+)*$`)
-    // (conveniently, that's the format of a standard float)
-    if version.parse::<f32>().is_err() { return Err(EwpError::new("version should be of the form 0.0")) }
-
-    let protocol = hdr_parts[2];
-    // check for allowed protocol
-    if protocol != "GOSSIP"
-    && protocol != "RPC"
-    && protocol != "PING" { return Err(EwpError::new("communication protocol unsupported")) }
-
-    let msg_hdr_len: usize = hdr_parts[3].parse()
-        .map_err(|_| EwpError::new("incorrect metadata format, cannot parse header-length"))?;
-
-    let msg_bdy_len: usize = hdr_parts[4].parse()
-        .map_err(|_| EwpError::new("incorrect metadata format, cannot parse body-length"))?;
-
-    // check for correctly-parsed sizes, instead of failing out
-    // validate payload length matches sum of header and body length
-    if payload.len() != msg_hdr_len + msg_bdy_len {
-        return Err(EwpError::new(&format!("unexpected payload size: {} != {} + {}",
-                                    payload.len(),
-                                    msg_hdr_len,
-                                    msg_bdy_len)))
-    }
-
-    let msg_hdr = &payload[0..msg_hdr_len];
-    let msg_bdy = &payload[msg_hdr_len..];
+    let mut index = Envelope::preamble().len();
+    let preamble = String::from_utf8(msg[0..index].to_vec()).unwrap();
+    let mut tmp = &msg[index..(index+4)];
+    let mut rdr = Cursor::new(tmp.to_vec());
+    // version
+    let version = rdr.read_u32::<BigEndian>().unwrap();
+    index = index + 4;
+    tmp = &msg[index..(index+1)];
+    rdr = Cursor::new(tmp.to_vec());
+    // protocol
+    let protocol = rdr.read_u8().unwrap();;
+    index = index + 1;
+    tmp = &msg[index..(index+4)];
+    rdr = Cursor::new(tmp.to_vec());
+    // header length
+    let hdr_len = usize::try_from(rdr.read_u32::<BigEndian>().unwrap()).unwrap();
+    index = index + 4;
+    tmp = &msg[index..(index+4)];
+    rdr = Cursor::new(tmp.to_vec());
+    // body length
+    let bdy_len = usize::try_from(rdr.read_u32::<BigEndian>().unwrap()).unwrap();
+    index = index + 4;
+    // header
+    let hdr = &msg[index..(index+hdr_len)];
+    index = index + hdr_len;
+    // body
+    let bdy = &msg[index..(index+bdy_len)];
 
     Ok( Envelope {
-        version: version.to_string(),
-        protocol: protocol.to_string(),
-        header: msg_hdr.to_owned(),
-        body: msg_bdy.to_owned()
+        version: version,
+        protocol: protocol,
+        header: hdr.to_owned(),
+        body: bdy.to_owned()
     })
 }
 
 
 #[cfg(test)]
 mod tests {
-    use super::{Envelope, unmarshal};
+    use super::{Envelope, unmarshal, marshal};
 
     #[test]
     fn test_unmarshal_successful() {
         struct Test {
-            message: Vec<u8>, // WARN! we're loading this from utf-8 strings, so don't use non-ascii string content
+            message: String, // WARN! we're loading this from utf-8 strings, so don't use non-ascii string content
             output: Envelope
-        }
+        } 
         let tests: Vec<Test> = vec!(
     		Test {
-    			message: "EWP 13.05 RPC 16 14\nthis is a headerthis is a body".to_string().into_bytes(),
+    			message: format!("{}{}{}{}",hex::encode("EWP".as_bytes()),"0000000d00000000100000000e", hex::encode("this is a header".as_bytes()), hex::encode("this is a body".as_bytes())),
     			output: Envelope {
-    				version:     "13.05".to_string(),
-    				protocol:    "RPC".to_string(),
+    				version:     13,
+    				protocol:    0,
     				header:      "this is a header".to_string().into_bytes(),
     				body:        "this is a body".to_string().into_bytes(),
     			},
     		},
     		Test {
-    			message: "EWP 13.05 GOSSIP 7 12\ntestingtesting body".to_string().into_bytes(),
+    			message: format!("{}{}{}{}",hex::encode("EWP".as_bytes()),"0000000d01000000070000000c", hex::encode("testing".as_bytes()), hex::encode("testing body".as_bytes())),
     			output: Envelope {
-    				version:     "13.05".to_string(),
-    				protocol:    "GOSSIP".to_string(),
+    				version:     13,
+    				protocol:    1,
     				header:      "testing".to_string().into_bytes(),
     				body:        "testing body".to_string().into_bytes(),
     			},
     		},
     		Test {
-    			message: "EWP 1230329483.05392489 RPC 4 4\ntesttest".to_string().into_bytes(),
+    			message: format!("{}{}{}{}",hex::encode("EWP".as_bytes()),"4955568b000000000400000004", hex::encode("test".as_bytes()), hex::encode("test".as_bytes())),
     			output: Envelope {
-    				version:     "1230329483.05392489".to_string(),
-    				protocol:    "RPC".to_string(),
+    				version:     1230329483,
+    				protocol:    0,
     				header:      "test".to_string().into_bytes(),
     				body:        "test".to_string().into_bytes(),
     			},
@@ -93,69 +85,59 @@ mod tests {
     	);
 
         for t in tests.iter() {
-            let unmarshalled = unmarshal(&t.message);
-            if let Ok(msg) = unmarshalled {
-                println!("{}", t.output);
-                assert!(msg == t.output);
-            } else {
-                assert!(false);
+            let unmarshalled = unmarshal(&hex::decode(t.message.clone()).unwrap());
+            match unmarshalled {
+                Ok(msg) => {
+                    println!("expected {}", t.message);
+                    println!("recieved {}", msg);
+                    assert!(msg.to_string() == t.output.to_string());
+                }
+                Err(err) => {
+                    println!("error {}", err);
+                    assert!(false);
+                }
             }
+            
         }
     }
 
     #[test]
-    fn test_unmarshal_unsuccessful() {
-
-        use super::*;
-
+    fn test_roundtrip() {
         struct Test {
-            message: Vec<u8>,
-            err: EwpError
+            message: Envelope,
         }
         let tests: Vec<Test> = vec!(
     		Test {
-    			message: "EWP 13.05 RPC blahblahblah json 16 14this is a headerthis is a body".to_string().into_bytes(),
-    			err:     EwpError::new("message request must contain 2 lines"),
-    		},
-    		Test {
-    			message: "EWP 13.05 7 12\ntestingtesting body".to_string().into_bytes(),
-    			err:     EwpError::new("not all metadata provided"),
-    		},
-    		Test {
-    			message: "EWP 123032948392489 RPC 4 4\ntesttest".to_string().into_bytes(),
-    			err:     EwpError::new("EWP version cannot be parsed"),
-    		},
-    		Test {
-    			message: "EWP 123032948.392489 notrpc 4 4\ntesttest".to_string().into_bytes(),
-    			err:     EwpError::new("communication protocol unsupported"),
-    		},
-    		Test {
-    			message: "EWP 123032948.392489 GOSSIP f 4\ntesttest".to_string().into_bytes(),
-                err:     EwpError::new("incorrect metadata format, cannot parse header-length"),
-                //err:     EwpError::new("invalid digit found in string"),
-    		},
-    		Test {
-    			message: "EWP 123032948.392489 GOSSIP 4 f\ntesttest".to_string().into_bytes(),
-                err:     EwpError::new("incorrect metadata format, cannot parse body-length"),
-                //err:     EwpError::new("invalid digit found in string"),
-    		},
-    	);
+    			message: Envelope {
+    				version:     13,
+    				protocol:    0,
+    				header:      "this is a header".to_string().into_bytes(),
+    				body:        "this is a body".to_string().into_bytes(),
+    			},
+    		}
+        );
         for t in tests.iter() {
-            let unmarshalled = unmarshal(&t.message);
-            match unmarshalled {
-                Ok(msg) => {
-                    // error expected!
-                    println!("expected: {}", &t.err);
-                    println!("received: {}", msg);
-                    assert!(msg != msg) // force fail
+            let marshalled = marshal(&t.message);
+            match marshalled {
+                Ok(m_msg) => {
+                    let unmarshalled = unmarshal(&m_msg);
+                    match unmarshalled {
+                        Ok(u_msg) => {
+                            println!("expected {}", t.message);
+                            println!("recieved {}", u_msg);
+                            assert!(u_msg.to_string() == t.message.to_string());
+                        }
+                        Err(err) => {
+                            println!("error {}", err);
+                            assert!(false);
+                        }
+                    }
                 }
                 Err(err) => {
-                    println!("expected: '{}'", t.err.details);
-                    println!("received: '{}'", err.details);
-                    assert!(t.err.details == err.details)
+                    println!("error {}", err);
+                    assert!(false);
                 }
             }
         }
     }
-
 }

@@ -6,27 +6,29 @@ use std::fmt;
 /// See examples of unparsed and parsed messages here: https://github.com/deltap2p/hobbits/blob/master/specs/protocol.md
 #[derive(Clone, Hash, Default, PartialEq, Debug)]
 pub struct Envelope {
-    pub version: String,
-    pub protocol: String,
+    pub version: u32,
+    pub protocol: u8,
     pub header: Vec<u8>,
     pub body: Vec<u8>,
 }
 
 impl Envelope {
-
-    pub fn new(proto: &str, hdr: &[u8], bdy: &[u8]) -> Envelope {
+    #[inline]
+    pub fn preamble() -> String {
+        return "EWP".to_string();
+    }
+    pub fn new(version: u32, proto: u8, hdr: &[u8], bdy: &[u8]) -> Envelope {
         return Envelope {
-            version: "0.2".to_string(),
-            protocol: proto.to_string(),
+            version: version,
+            protocol: proto,
             header: hdr.to_vec(),
             body: bdy.to_vec()
         }
     }
-
 }
 impl fmt::Display for Envelope {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "EWP {} {} {} {}\n0x{}\n0x{}",
-            self.version, self.protocol, self.header.len(), self.body.len(), hex::encode(&self.header), hex::encode(&self.body))
+        write!(f, "{} {} {} {} {} {} {}",
+            Envelope::preamble(), self.version, self.protocol, self.header.len(), self.body.len(), hex::encode(&self.header), hex::encode(&self.body))
 	}
 }
